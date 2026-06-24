@@ -106,3 +106,10 @@ func (m *Model) shouldRefreshGitEvent(now time.Time) bool {
 	}
 	return m.state.services.watch.ShouldRefresh(now)
 }
+
+func (m *Model) shouldRefreshAgentEvent(now time.Time) bool {
+	if m.state.services.agentWatch == nil {
+		return false
+	}
+	return m.state.services.agentWatch.ShouldRefresh(now)
+}

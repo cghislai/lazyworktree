@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -20,14 +21,20 @@ type AgentWatchService struct {
 	Paths   map[string]struct{}
 	Mu      sync.Mutex
 	Watcher *fsnotify.Watcher
-	logf    func(string, ...any)
+	// Debounce throttles how often transcript-write bursts trigger a refresh.
+	// A value <= 0 disables throttling. See ShouldRefresh.
+	Debounce    time.Duration
+	LastRefresh time.Time
+	logf        func(string, ...any)
 }
 
-// NewAgentWatchService creates a watcher for the provided roots.
-func NewAgentWatchService(roots []string, logf func(string, ...any)) *AgentWatchService {
+// NewAgentWatchService creates a watcher for the provided roots. debounce
+// bounds how often transcript-write events trigger a full session re-parse.
+func NewAgentWatchService(roots []string, debounce time.Duration, logf func(string, ...any)) *AgentWatchService {
 	return &AgentWatchService{
-		Roots: roots,
-		logf:  logf,
+		Roots:    roots,
+		Debounce: debounce,
+		logf:     logf,
 	}
 }
 
@@ -88,6 +95,21 @@ func (w *AgentWatchService) NextEvent() <-chan struct{} {
 // ResetWaiting clears the pending wait flag after an event is processed.
 func (w *AgentWatchService) ResetWaiting() {
 	w.Waiting = false
+}
+
+// ShouldRefresh reports whether enough time has elapsed since the last refresh
+// to warrant another. An active agent appends to its transcript many times per
+// second; without this throttle every append triggers a full re-parse of every
+// session JSONL and pegs a CPU core. A Debounce <= 0 disables throttling.
+func (w *AgentWatchService) ShouldRefresh(now time.Time) bool {
+	if w.Debounce <= 0 {
+		return true
+	}
+	if !w.LastRefresh.IsZero() && now.Sub(w.LastRefresh) < w.Debounce {
+		return false
+	}
+	w.LastRefresh = now
+	return true
 }
 
 func (w *AgentWatchService) run() {

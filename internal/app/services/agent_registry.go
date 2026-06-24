@@ -38,6 +38,15 @@ type SessionRegistryStore interface {
 type fileSessionRegistryStore struct {
 	path string
 	mu   sync.Mutex
+
+	// In-process cache of the parsed registry, reused while the file's mtime and
+	// size are unchanged. RefreshWithProcesses calls Load on every watcher event,
+	// and the registry accumulates every historical session, so unmarshalling it
+	// each time dominated CPU while an agent was actively writing transcripts.
+	cached      map[string]*models.AgentSession
+	cachedMtime time.Time
+	cachedSize  int64
+	cacheValid  bool
 }
 
 func newFileSessionRegistryStore() SessionRegistryStore {
@@ -57,9 +66,23 @@ func (s *fileSessionRegistryStore) Load() (map[string]*models.AgentSession, erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	info, err := os.Stat(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			s.invalidateCache()
+			return map[string]*models.AgentSession{}, nil
+		}
+		return nil, err
+	}
+
+	if s.cacheValid && info.ModTime().Equal(s.cachedMtime) && info.Size() == s.cachedSize {
+		return cloneSessionMap(s.cached), nil
+	}
+
 	data, err := os.ReadFile(s.path) // #nosec G304 -- registry path is app-controlled.
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			s.invalidateCache()
 			return map[string]*models.AgentSession{}, nil
 		}
 		return nil, err
@@ -70,19 +93,13 @@ func (s *fileSessionRegistryStore) Load() (map[string]*models.AgentSession, erro
 		return nil, err
 	}
 
-	sessions := make(map[string]*models.AgentSession, len(payload.Sessions))
+	raw := make([]*models.AgentSession, 0, len(payload.Sessions))
 	for _, record := range payload.Sessions {
-		if record.Session == nil {
-			continue
-		}
-		key := strings.TrimSpace(record.Session.SessionKey)
-		if key == "" {
-			key = agentSessionKey(record.Session)
-		}
-		record.Session.SessionKey = key
-		sessions[key] = cloneAgentSession(record.Session)
+		raw = append(raw, record.Session)
 	}
-	return sessions, nil
+	sessions := registrySessionMap(raw)
+	s.storeCache(sessions, info.ModTime(), info.Size())
+	return cloneSessionMap(sessions), nil
 }
 
 func (s *fileSessionRegistryStore) Save(sessions []*models.AgentSession) error {
@@ -117,7 +134,58 @@ func (s *fileSessionRegistryStore) Save(sessions []*models.AgentSession) error {
 		return err
 	}
 
-	return writeAtomically(s.path, data)
+	if err := writeAtomically(s.path, data); err != nil {
+		return err
+	}
+
+	// Refresh the in-process cache so the next Load (fired on every watcher
+	// event) reuses it instead of re-reading and unmarshalling what we just wrote.
+	if info, statErr := os.Stat(s.path); statErr == nil {
+		s.storeCache(registrySessionMap(sessions), info.ModTime(), info.Size())
+	} else {
+		s.invalidateCache()
+	}
+	return nil
+}
+
+func (s *fileSessionRegistryStore) storeCache(sessions map[string]*models.AgentSession, mtime time.Time, size int64) {
+	s.cached = sessions
+	s.cachedMtime = mtime
+	s.cachedSize = size
+	s.cacheValid = true
+}
+
+func (s *fileSessionRegistryStore) invalidateCache() {
+	s.cached = nil
+	s.cacheValid = false
+}
+
+// registrySessionMap builds the persisted-registry map form, normalising keys
+// and deep-cloning each session so callers and the cache never alias.
+func registrySessionMap(sessions []*models.AgentSession) map[string]*models.AgentSession {
+	out := make(map[string]*models.AgentSession, len(sessions))
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		key := strings.TrimSpace(session.SessionKey)
+		if key == "" {
+			key = agentSessionKey(session)
+		}
+		clone := cloneAgentSession(session)
+		clone.SessionKey = key
+		out[key] = clone
+	}
+	return out
+}
+
+// cloneSessionMap returns a deep copy of a registry map.
+func cloneSessionMap(in map[string]*models.AgentSession) map[string]*models.AgentSession {
+	out := make(map[string]*models.AgentSession, len(in))
+	for k, v := range in {
+		out[k] = cloneAgentSession(v)
+	}
+	return out
 }
 
 func agentSessionRegistryPath() string {
