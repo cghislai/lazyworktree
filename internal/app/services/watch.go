@@ -13,7 +13,12 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// GitWatchDebounce is the debounce window for watcher events.
+// GitWatchDebounce is the default debounce window for watcher events. It can
+// be overridden per-instance from config (git_watch_debounce_ms). Raising it
+// throttles how often a filesystem change under .git triggers a full worktree
+// refresh — that refresh runs git and can contend for a worktree's index.lock
+// with a concurrently-running agent, so a large window keeps the watcher out
+// of the agent's way.
 const GitWatchDebounce = 600 * time.Millisecond
 
 // GitCommonDirResolver resolves the git common directory for a repository.
@@ -33,6 +38,7 @@ type GitWatchService struct {
 	Mu          sync.Mutex
 	Watcher     *fsnotify.Watcher
 	LastRefresh time.Time
+	Debounce    time.Duration
 	git         GitCommonDirResolver
 	logf        func(string, ...any)
 }
@@ -40,8 +46,9 @@ type GitWatchService struct {
 // NewGitWatchService creates a new GitWatchService.
 func NewGitWatchService(git GitCommonDirResolver, logf func(string, ...any)) *GitWatchService {
 	return &GitWatchService{
-		git:  git,
-		logf: logf,
+		git:      git,
+		logf:     logf,
+		Debounce: GitWatchDebounce,
 	}
 }
 
@@ -62,6 +69,9 @@ func (w *GitWatchService) Start(ctx context.Context, cfg *config.AppConfig) (boo
 
 	w.Started = true
 	w.Watcher = watcher
+	if cfg.GitWatchDebounceMs > 0 {
+		w.Debounce = time.Duration(cfg.GitWatchDebounceMs) * time.Millisecond
+	}
 	w.CommonDir = commonDir
 	w.Events = make(chan struct{}, 1)
 	w.Done = make(chan struct{})
@@ -108,7 +118,11 @@ func (w *GitWatchService) ResetWaiting() {
 
 // ShouldRefresh checks debounce timing for watcher events.
 func (w *GitWatchService) ShouldRefresh(now time.Time) bool {
-	if !w.LastRefresh.IsZero() && now.Sub(w.LastRefresh) < GitWatchDebounce {
+	debounce := w.Debounce
+	if debounce <= 0 {
+		debounce = GitWatchDebounce
+	}
+	if !w.LastRefresh.IsZero() && now.Sub(w.LastRefresh) < debounce {
 		return false
 	}
 	w.LastRefresh = now

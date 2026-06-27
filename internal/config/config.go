@@ -51,6 +51,7 @@ type AppConfig struct {
 	AutoRefresh             bool
 	CIAutoRefresh           bool // Periodically refresh CI status (GitHub only, uses API rate limits)
 	RefreshIntervalSeconds  int
+	GitWatchDebounceMs      int // Debounce window (ms) for git-watcher-triggered worktree refreshes; raise to keep the watcher's git calls from contending for index.lock with running agents (default: 600)
 	CustomCommands          CustomCommandsConfig
 	Keybindings             KeybindingsConfig
 	BranchNameScript        string // Script to generate branch name suggestions from diff
@@ -93,6 +94,7 @@ func DefaultConfig() *AppConfig {
 		AutoFetchPRs:            false,
 		AutoRefresh:             true,
 		RefreshIntervalSeconds:  10,
+		GitWatchDebounceMs:      600,
 		SearchAutoSelect:        false,
 		MaxUntrackedDiffs:       10,
 		MaxDiffChars:            200000,
@@ -237,6 +239,7 @@ func parseConfig(data map[string]any) (*AppConfig, error) {
 	cfg.AutoRefresh = coerceBool(data["auto_refresh"], cfg.AutoRefresh)
 	cfg.CIAutoRefresh = coerceBool(data["ci_auto_refresh"], false)
 	cfg.RefreshIntervalSeconds = coerceInt(data["refresh_interval"], cfg.RefreshIntervalSeconds)
+	cfg.GitWatchDebounceMs = coerceInt(data["git_watch_debounce_ms"], cfg.GitWatchDebounceMs)
 	cfg.SearchAutoSelect = coerceBool(data["search_auto_select"], false)
 	cfg.FuzzyFinderInput = coerceBool(data["fuzzy_finder_input"], false)
 	cfg.PruneStaleBranches = coerceBool(data["prune_stale_branches"], false)
@@ -672,6 +675,9 @@ func (cfg *AppConfig) ApplyCLIOverrides(overrides []string) error {
 	}
 	if _, ok := overrideData["refresh_interval_seconds"]; ok {
 		cfg.RefreshIntervalSeconds = overrideCfg.RefreshIntervalSeconds
+	}
+	if _, ok := overrideData["git_watch_debounce_ms"]; ok {
+		cfg.GitWatchDebounceMs = overrideCfg.GitWatchDebounceMs
 	}
 	if _, ok := overrideData["palette_mru_limit"]; ok {
 		cfg.PaletteMRULimit = overrideCfg.PaletteMRULimit
