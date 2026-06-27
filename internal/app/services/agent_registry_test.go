@@ -55,7 +55,9 @@ func TestAgentSessionServiceFallsBackToRegistryWhenParsingFails(t *testing.T) {
 	claudeRoot := filepath.Join(root, "claude")
 	sessionPath := filepath.Join(claudeRoot, "project-a", "session-1.jsonl")
 	worktreePath := filepath.Join(root, "worktrees", "feature")
-	now := time.Now().UTC()
+	// Two minutes ago: within the recent window but beyond the mtime active
+	// window, so the fallback below is classified recent rather than active.
+	now := time.Now().UTC().Add(-2 * time.Minute)
 
 	writeJSONLLines(
 		t, sessionPath,
@@ -72,6 +74,9 @@ func TestAgentSessionServiceFallsBackToRegistryWhenParsingFails(t *testing.T) {
 			},
 		}),
 	)
+	if err := os.Chtimes(sessionPath, now, now); err != nil {
+		t.Fatalf("Chtimes returned error: %v", err)
+	}
 
 	service := NewAgentSessionServiceWithStore(
 		claudeRoot,

@@ -159,12 +159,16 @@ The Agent Sessions pane surfaces live AI coding-agent transcripts (Claude Code, 
 
 - `disabled`: set to `true` to turn off transcript watching entirely and hide the pane (default: `false`).
 - `refresh_debounce_ms`: debounce window in milliseconds for transcript-driven refreshes (default: `600`). Raise it to lower CPU while an agent is actively writing; set to `0` to disable throttling.
+- `active_window_ms`: a transcript written within this many milliseconds marks its session active, read from the file modification time without parsing (default: `20000`). Lower it for snappier idle detection; raise it to tolerate longer quiet gaps; set to `0` to disable modification-time liveness.
+- `liveness_recheck_ms`: idle re-check heartbeat in milliseconds while a session is active (default: `4000`). A session that stops writing emits no filesystem events, so this timer demotes it from active once the active window lapses; set to `0` to disable.
 - `claude_root`, `pi_root`: override the base directories searched for transcripts (defaults: `~/.claude/projects` and `~/.pi/agent/sessions`).
 
 ```yaml
 agent_sessions:
   disabled: false
   refresh_debounce_ms: 600
+  active_window_ms: 20000
+  liveness_recheck_ms: 4000
   claude_root: ~/.claude/projects
   pi_root: ~/.pi/agent/sessions
 ```

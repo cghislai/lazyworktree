@@ -73,6 +73,8 @@ type AppConfig struct {
 	AgentSessionPiRoot      string // Custom root for pi transcript discovery (default: ~/.pi/agent/sessions)
 	AgentSessionsDisabled   bool   // Disable the Agent Sessions pane and transcript watching (default: false)
 	AgentRefreshDebounceMs  int    // Debounce window (ms) for agent transcript refreshes (default: 600; 0 disables throttling)
+	AgentActiveWindowMs     int    // Transcript mtime newer than this marks a session active (default: 20000; 0 disables mtime liveness)
+	AgentLivenessRecheckMs  int    // Idle re-check heartbeat (ms) while a session is active (default: 4000; 0 disables)
 	CustomCreateMenus       []*CustomCreateMenu
 	CustomThemes            map[string]*CustomTheme // User-defined custom themes
 	LayoutSizes             *LayoutSizes            // Configurable pane size weights (nil = use defaults)
@@ -114,6 +116,8 @@ func DefaultConfig() *AppConfig {
 		IconSet:                 "nerd-font-v3",
 		AvatarBadges:            "auto",
 		AgentRefreshDebounceMs:  600,
+		AgentActiveWindowMs:     20000,
+		AgentLivenessRecheckMs:  4000,
 		CustomThemes:            make(map[string]*CustomTheme),
 		Keybindings:             make(KeybindingsConfig),
 		CustomCommands: CustomCommandsConfig{
@@ -216,6 +220,8 @@ func parseConfig(data map[string]any) (*AppConfig, error) {
 		}
 		cfg.AgentSessionsDisabled = coerceBool(agentData["disabled"], cfg.AgentSessionsDisabled)
 		cfg.AgentRefreshDebounceMs = coerceInt(agentData["refresh_debounce_ms"], cfg.AgentRefreshDebounceMs)
+		cfg.AgentActiveWindowMs = coerceInt(agentData["active_window_ms"], cfg.AgentActiveWindowMs)
+		cfg.AgentLivenessRecheckMs = coerceInt(agentData["liveness_recheck_ms"], cfg.AgentLivenessRecheckMs)
 	}
 
 	cfg.InitCommands = normalizeCommandList(data["init_commands"])
@@ -620,6 +626,12 @@ func (cfg *AppConfig) ApplyCLIOverrides(overrides []string) error {
 	}
 	if overrideNestedData(overrideData, "agent_sessions", "refresh_debounce_ms") {
 		cfg.AgentRefreshDebounceMs = overrideCfg.AgentRefreshDebounceMs
+	}
+	if overrideNestedData(overrideData, "agent_sessions", "active_window_ms") {
+		cfg.AgentActiveWindowMs = overrideCfg.AgentActiveWindowMs
+	}
+	if overrideNestedData(overrideData, "agent_sessions", "liveness_recheck_ms") {
+		cfg.AgentLivenessRecheckMs = overrideCfg.AgentLivenessRecheckMs
 	}
 
 	// Arrays - check if they exist in override data

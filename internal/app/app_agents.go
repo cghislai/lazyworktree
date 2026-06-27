@@ -3,6 +3,7 @@ package app
 import (
 	"image/color"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -77,6 +78,41 @@ func (m *Model) stopAgentWatcher() {
 	if watcher := m.state.services.agentWatch; watcher != nil && watcher.Started {
 		watcher.Stop()
 	}
+}
+
+// scheduleAgentLivenessRecheck arms a single idle re-check while any session is
+// live. An agent going idle stops writing its transcript and so emits no
+// filesystem events; without this timer an active session would never demote
+// until the next focused periodic refresh (and never at all while unfocused).
+// The heartbeat self-stops: a recheck that finds nothing live does not re-arm.
+func (m *Model) scheduleAgentLivenessRecheck(sessions []*models.AgentSession) tea.Cmd {
+	if !m.agentSessionsEnabled() || m.agentLivenessRecheckPending {
+		return nil
+	}
+	if m.config == nil || m.config.AgentLivenessRecheckMs <= 0 {
+		return nil
+	}
+	if !anyAgentSessionLive(sessions) {
+		return nil
+	}
+	m.agentLivenessRecheckPending = true
+	interval := time.Duration(m.config.AgentLivenessRecheckMs) * time.Millisecond
+	return tea.Tick(interval, func(time.Time) tea.Msg {
+		return agentLivenessRecheckMsg{}
+	})
+}
+
+func anyAgentSessionLive(sessions []*models.AgentSession) bool {
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		switch session.LivenessState {
+		case models.AgentSessionLivenessActive, models.AgentSessionLivenessSuspect:
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) waitForAgentWatchEvent() tea.Cmd {
@@ -334,6 +370,8 @@ func (m *Model) renderAgentSessionLivenessBadge(session *models.AgentSession) st
 			label = "exact"
 		case models.AgentSessionLivenessSourceNative:
 			label = "native"
+		case models.AgentSessionLivenessSourceFileMtime:
+			label = "live"
 		}
 	case models.AgentSessionLivenessRecent:
 		bg = m.theme.Cyan

@@ -19,6 +19,10 @@ const (
 	agentWaitingTimeout  = 2 * time.Minute
 	claudeSessionSchema  = "claude-jsonl-v1"
 	piSessionSchema      = "pi-jsonl-v1"
+	// defaultAgentActiveWindow marks a session active when its transcript was
+	// written this recently. Liveness is read from the file mtime (cheap stat)
+	// so an actively-writing agent shows as active without confirming a process.
+	defaultAgentActiveWindow = 20 * time.Second
 )
 
 type agentSessionCacheEntry struct {
@@ -68,14 +72,24 @@ func (a *transcriptAgentAdapter) Discover(
 
 // AgentSessionService discovers Claude and pi transcript sessions from disk.
 type AgentSessionService struct {
-	mu         sync.RWMutex
-	cache      map[string]agentSessionCacheEntry
-	sessions   []*models.AgentSession
-	claudeRoot string
-	piRoot     string
-	adapters   []AgentAdapter
-	store      SessionRegistryStore
-	logf       func(string, ...any)
+	mu           sync.RWMutex
+	cache        map[string]agentSessionCacheEntry
+	sessions     []*models.AgentSession
+	claudeRoot   string
+	piRoot       string
+	adapters     []AgentAdapter
+	store        SessionRegistryStore
+	activeWindow time.Duration
+	logf         func(string, ...any)
+}
+
+// SetActiveWindow overrides how recently a transcript must have been written for
+// its session to count as active. A value <= 0 disables mtime-based liveness,
+// falling back to the recent/inactive window only.
+func (s *AgentSessionService) SetActiveWindow(d time.Duration) {
+	s.mu.Lock()
+	s.activeWindow = d
+	s.mu.Unlock()
 }
 
 // NewAgentSessionService builds a service using the default agent transcript locations.
@@ -110,8 +124,9 @@ func NewAgentSessionServiceWithStore(claudeRoot, piRoot string, store SessionReg
 			&transcriptAgentAdapter{name: "claude", root: claudeRoot, parse: parseClaudeSession},
 			&transcriptAgentAdapter{name: "pi", root: piRoot, parse: parsePiSession},
 		},
-		store: store,
-		logf:  logf,
+		store:        store,
+		activeWindow: defaultAgentActiveWindow,
+		logf:         logf,
 	}
 }
 
@@ -280,7 +295,7 @@ func (s *AgentSessionService) cachedSession(path string, parse func() (*models.A
 	entry, ok := s.cache[path]
 	s.mu.RUnlock()
 	if ok && entry.mtime.Equal(mtime) {
-		return cloneAgentSession(entry.session), nil
+		return withMtimeActivity(cloneAgentSession(entry.session), mtime), nil
 	}
 
 	session, err := parse()
@@ -290,11 +305,24 @@ func (s *AgentSessionService) cachedSession(path string, parse func() (*models.A
 	if session == nil {
 		return nil, nil
 	}
+	withMtimeActivity(session, mtime)
 
 	s.mu.Lock()
 	s.cache[path] = agentSessionCacheEntry{mtime: mtime, session: cloneAgentSession(session)}
 	s.mu.Unlock()
 	return session, nil
+}
+
+// withMtimeActivity bumps LastActivity to the file mtime when the mtime is newer,
+// so liveness reflects the latest write even when the last line is unparseable.
+func withMtimeActivity(session *models.AgentSession, mtime time.Time) *models.AgentSession {
+	if session == nil {
+		return nil
+	}
+	if mtime.After(session.LastActivity) {
+		session.LastActivity = mtime
+	}
+	return session
 }
 
 func (s *AgentSessionService) pruneCache(seen map[string]struct{}) {
@@ -1275,34 +1303,32 @@ func (s *AgentSessionService) classifySessionLiveness(
 		if session == nil {
 			continue
 		}
-		if session.LivenessState == models.AgentSessionLivenessActive || session.LivenessState == models.AgentSessionLivenessSuspect {
-			session.Activity = resolveAgentActivity(
-				session.LastSummaryAt,
-				session.LastToolAt,
-				session.LastToolName,
-				session.CurrentTool,
-				session.IsOpen,
-				session.Status,
-				session.LastActivity,
-				now,
-			)
-			continue
-		}
-
-		observation := sessionObservationTime(session)
-		if !observation.IsZero() && now.Sub(observation) <= agentRecentThreshold {
-			session.LivenessState = models.AgentSessionLivenessRecent
-			session.LivenessSource = models.AgentSessionLivenessSourceRegistry
-		} else {
-			session.LivenessState = models.AgentSessionLivenessInactive
-			session.LivenessSource = models.AgentSessionLivenessSourceNone
+		switch {
+		case session.LivenessState == models.AgentSessionLivenessActive ||
+			session.LivenessState == models.AgentSessionLivenessSuspect:
+			// Already established by a live-process match (exact file or cwd).
+		case s.activeWindow > 0 && !session.LastActivity.IsZero() &&
+			now.Sub(session.LastActivity) <= s.activeWindow:
+			// The transcript was written within the active window: treat as active
+			// from the mtime alone, without confirming a live process.
+			session.LivenessState = models.AgentSessionLivenessActive
+			session.LivenessSource = models.AgentSessionLivenessSourceFileMtime
+		default:
+			observation := sessionObservationTime(session)
+			if !observation.IsZero() && now.Sub(observation) <= agentRecentThreshold {
+				session.LivenessState = models.AgentSessionLivenessRecent
+				session.LivenessSource = models.AgentSessionLivenessSourceRegistry
+			} else {
+				session.LivenessState = models.AgentSessionLivenessInactive
+				session.LivenessSource = models.AgentSessionLivenessSourceNone
+			}
 		}
 		session.Activity = resolveAgentActivity(
 			session.LastSummaryAt,
 			session.LastToolAt,
 			session.LastToolName,
 			session.CurrentTool,
-			false,
+			session.IsOpen,
 			session.Status,
 			session.LastActivity,
 			now,

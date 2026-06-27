@@ -96,6 +96,8 @@ const (
 	AgentSessionLivenessSourceRegistry AgentSessionLivenessSource = "registry"
 	// AgentSessionLivenessSourceExactFile means a live process has the transcript file open.
 	AgentSessionLivenessSourceExactFile AgentSessionLivenessSource = "exact_file"
+	// AgentSessionLivenessSourceFileMtime means the transcript file was written within the active window.
+	AgentSessionLivenessSourceFileMtime AgentSessionLivenessSource = "file_mtime"
 	// AgentSessionLivenessSourceCWDHeuristic means the match came only from a working-directory heuristic.
 	AgentSessionLivenessSourceCWDHeuristic AgentSessionLivenessSource = "cwd_heuristic"
 	// AgentSessionLivenessSourceNone means no evidence was available.

@@ -97,10 +97,11 @@ type (
 		sessions []*models.AgentSession
 		err      error
 	}
-	agentWatchChangedMsg  struct{}
-	agentRefreshDueMsg    struct{}
-	deprecationWarningMsg struct{}
-	debouncedDetailsMsg   struct {
+	agentWatchChangedMsg    struct{}
+	agentRefreshDueMsg      struct{}
+	agentLivenessRecheckMsg struct{}
+	deprecationWarningMsg   struct{}
+	debouncedDetailsMsg     struct {
 		selectedIndex int
 	}
 	cachedWorktreesMsg struct {
@@ -388,6 +389,11 @@ type Model struct {
 	// Auto refresh
 	autoRefreshStarted bool
 
+	// agentLivenessRecheckPending guards the idle re-check heartbeat so at most
+	// one is scheduled at a time. Agents going idle produce no filesystem events,
+	// so a timer is the only way to observe the active -> idle transition.
+	agentLivenessRecheckPending bool
+
 	// Trust / repo commands
 	repoConfig     *config.RepoConfig
 	repoConfigPath string
@@ -598,6 +604,7 @@ func NewModel(cfg *config.AppConfig, initialFilter string) *Model {
 	m.state.services.agentSessions = services.NewAgentSessionServiceFromConfig(
 		cfg.AgentSessionClaudeRoot, cfg.AgentSessionPiRoot, m.debugf,
 	)
+	m.state.services.agentSessions.SetActiveWindow(time.Duration(cfg.AgentActiveWindowMs) * time.Millisecond)
 	m.state.services.agentProcesses = services.NewAgentProcessService(m.debugf)
 	m.state.services.agentWatch = services.NewAgentWatchService(
 		m.state.services.agentSessions.WatchRoots(),
@@ -732,8 +739,18 @@ func (m *Model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.state.data.agentSessions = msg.sessions
 			m.refreshSelectedWorktreeAgentSessionsPane()
+			if cmd := m.scheduleAgentLivenessRecheck(msg.sessions); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
+
+	case agentLivenessRecheckMsg:
+		m.agentLivenessRecheckPending = false
+		if cmd := m.refreshAgentSessions(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
 
 	case agentWatchChangedMsg:
 		if m.state.services.agentWatch != nil {

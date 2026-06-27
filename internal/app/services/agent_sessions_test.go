@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/chmouel/lazyworktree/internal/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseClaudeSession(t *testing.T) {
@@ -286,6 +288,80 @@ func TestAgentSessionServiceRefreshInvalidatesCache(t *testing.T) {
 	}
 	if len(second) != 1 || second[0].CurrentTool != "Write" {
 		t.Fatalf("expected cache invalidation to pick up Write tool, got %#v", second)
+	}
+}
+
+// TestAgentSessionServiceMtimeLiveness proves liveness is driven by the
+// transcript file mtime: a recently-written file is active without any live
+// process, regardless of the (possibly stale) last entry timestamp, and it
+// demotes to recent then inactive as the mtime ages past the windows.
+func TestAgentSessionServiceMtimeLiveness(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	cases := []struct {
+		name      string
+		entryTS   time.Time
+		mtime     time.Time
+		wantState models.AgentSessionLiveness
+		wantSrc   models.AgentSessionLivenessSource
+	}{
+		{
+			name:      "recent mtime marks active despite a stale entry timestamp",
+			entryTS:   now.Add(-time.Hour),
+			mtime:     now.Add(-5 * time.Second),
+			wantState: models.AgentSessionLivenessActive,
+			wantSrc:   models.AgentSessionLivenessSourceFileMtime,
+		},
+		{
+			name:      "mtime past the active window is recent",
+			entryTS:   now.Add(-2 * time.Minute),
+			mtime:     now.Add(-2 * time.Minute),
+			wantState: models.AgentSessionLivenessRecent,
+			wantSrc:   models.AgentSessionLivenessSourceRegistry,
+		},
+		{
+			name:      "mtime past the recent window is inactive",
+			entryTS:   now.Add(-20 * time.Minute),
+			mtime:     now.Add(-20 * time.Minute),
+			wantState: models.AgentSessionLivenessInactive,
+			wantSrc:   models.AgentSessionLivenessSourceNone,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			claudeRoot := filepath.Join(root, "claude")
+			worktreePath := filepath.Join(root, "worktrees", "feature")
+			sessionPath := filepath.Join(claudeRoot, "project-a", "session.jsonl")
+			writeJSONLLines(t, sessionPath, mustJSONLine(t, map[string]any{
+				"type":      "assistant",
+				"cwd":       worktreePath,
+				"timestamp": tc.entryTS.Format(time.RFC3339Nano),
+				"message": map[string]any{
+					"role":    "assistant",
+					"model":   "claude-sonnet-4",
+					"content": []map[string]any{{"type": "text", "text": "hello"}},
+				},
+			}))
+			require.NoError(t, os.Chtimes(sessionPath, tc.mtime, tc.mtime))
+
+			service := NewAgentSessionServiceWithStore(
+				claudeRoot, "",
+				NewTestSessionRegistryStore(filepath.Join(root, "registry.json")),
+				nil,
+			)
+			service.SetActiveWindow(20 * time.Second)
+
+			sessions, err := service.Refresh()
+			require.NoError(t, err)
+			require.Len(t, sessions, 1)
+			assert.Equal(t, tc.wantState, sessions[0].LivenessState)
+			assert.Equal(t, tc.wantSrc, sessions[0].LivenessSource)
+			assert.WithinDuration(t, tc.mtime, sessions[0].LastActivity, time.Second)
+		})
 	}
 }
 

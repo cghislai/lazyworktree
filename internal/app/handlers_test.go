@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/chmouel/lazyworktree/internal/app/services"
 	"github.com/chmouel/lazyworktree/internal/models"
@@ -46,9 +47,15 @@ func seedClaudeAgentSessions(t *testing.T, m *Model, worktreePath string, openSt
 			t.Fatalf("mkdir: %v", err)
 		}
 		jsonlPath := filepath.Join(projectDir, "session.jsonl")
+		entryTime := time.Date(2026, 3, 11, 10, 0, 0, 0, time.UTC)
 		content := `{"type":"assistant","timestamp":"2026-03-11T10:00:00Z","cwd":"` + worktreePath + `","gitBranch":"feat","message":{"role":"assistant","model":"claude-sonnet","content":[{"type":"text","text":"Done ` + strconv.Itoa(i) + `"}]}}`
-		if err := os.WriteFile(jsonlPath, []byte(content+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(jsonlPath, []byte(content+"\n"), 0o600); err != nil {
 			t.Fatalf("write jsonl: %v", err)
+		}
+		// Align the file mtime with the transcript's own timestamp so offline
+		// sessions are not treated as freshly written (active) by mtime liveness.
+		if err := os.Chtimes(jsonlPath, entryTime, entryTime); err != nil {
+			t.Fatalf("chtimes jsonl: %v", err)
 		}
 		if open {
 			processes = append(processes, &services.AgentProcess{
