@@ -251,3 +251,73 @@ func TestRenderAgentSessionMarkerUsesTextGlyphForClaude(t *testing.T) {
 		t.Fatalf("expected text Claude marker, got %q", marker)
 	}
 }
+
+// TestScheduleAgentLivenessRecheck covers the liveness_recheck_ms heartbeat that
+// notices an agent going idle: it arms only while a session is live, never
+// double-arms, and is disabled by a zero interval or a disabled pane.
+func TestScheduleAgentLivenessRecheck(t *testing.T) {
+	live := []*models.AgentSession{{LivenessState: models.AgentSessionLivenessActive}}
+	suspect := []*models.AgentSession{{LivenessState: models.AgentSessionLivenessSuspect}}
+	idle := []*models.AgentSession{{LivenessState: models.AgentSessionLivenessInactive}}
+
+	newModel := func(t *testing.T, recheckMs int, disabled bool) *Model {
+		t.Helper()
+		return NewModel(&config.AppConfig{
+			WorktreeDir:            t.TempDir(),
+			AgentLivenessRecheckMs: recheckMs,
+			AgentSessionsDisabled:  disabled,
+		}, "")
+	}
+
+	t.Run("arms a recheck while a session is active", func(t *testing.T) {
+		m := newModel(t, 4000, false)
+		if cmd := m.scheduleAgentLivenessRecheck(live); cmd == nil {
+			t.Fatal("expected a recheck command for an active session")
+		}
+		if !m.agentLivenessRecheckPending {
+			t.Fatal("expected pending flag to be set")
+		}
+	})
+
+	t.Run("arms a recheck while a session is suspect", func(t *testing.T) {
+		m := newModel(t, 4000, false)
+		if cmd := m.scheduleAgentLivenessRecheck(suspect); cmd == nil {
+			t.Fatal("expected a recheck command for a suspect session")
+		}
+	})
+
+	t.Run("does not arm when nothing is live", func(t *testing.T) {
+		m := newModel(t, 4000, false)
+		if cmd := m.scheduleAgentLivenessRecheck(idle); cmd != nil {
+			t.Fatal("expected no recheck when no session is live")
+		}
+		if m.agentLivenessRecheckPending {
+			t.Fatal("expected pending flag to stay clear")
+		}
+	})
+
+	t.Run("does not double-arm while one is pending", func(t *testing.T) {
+		m := newModel(t, 4000, false)
+		m.agentLivenessRecheckPending = true
+		if cmd := m.scheduleAgentLivenessRecheck(live); cmd != nil {
+			t.Fatal("expected no second recheck while one is pending")
+		}
+	})
+
+	t.Run("zero interval disables the heartbeat", func(t *testing.T) {
+		m := newModel(t, 0, false)
+		if cmd := m.scheduleAgentLivenessRecheck(live); cmd != nil {
+			t.Fatal("expected no recheck when liveness_recheck_ms is zero")
+		}
+		if m.agentLivenessRecheckPending {
+			t.Fatal("expected pending flag to stay clear when disabled")
+		}
+	})
+
+	t.Run("disabled pane never arms", func(t *testing.T) {
+		m := newModel(t, 4000, true)
+		if cmd := m.scheduleAgentLivenessRecheck(live); cmd != nil {
+			t.Fatal("expected no recheck when agent sessions are disabled")
+		}
+	})
+}

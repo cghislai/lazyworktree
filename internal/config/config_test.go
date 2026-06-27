@@ -2026,6 +2026,8 @@ func TestParseConfigAgentSessions(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, cfg.AgentSessionsDisabled)
 		assert.Equal(t, 600, cfg.AgentRefreshDebounceMs)
+		assert.Equal(t, 20000, cfg.AgentActiveWindowMs)
+		assert.Equal(t, 4000, cfg.AgentLivenessRecheckMs)
 	})
 
 	t.Run("disable feature and tune debounce", func(t *testing.T) {
@@ -2046,5 +2048,29 @@ func TestParseConfigAgentSessions(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, 0, cfg.AgentRefreshDebounceMs)
+	})
+
+	t.Run("tune active window and liveness recheck", func(t *testing.T) {
+		cfg, err := parseConfig(map[string]any{
+			"agent_sessions": map[string]any{
+				"active_window_ms":    45000,
+				"liveness_recheck_ms": 2000,
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 45000, cfg.AgentActiveWindowMs)
+		assert.Equal(t, 2000, cfg.AgentLivenessRecheckMs)
+	})
+
+	t.Run("explicit zero disables mtime liveness and heartbeat", func(t *testing.T) {
+		cfg, err := parseConfig(map[string]any{
+			"agent_sessions": map[string]any{
+				"active_window_ms":    0,
+				"liveness_recheck_ms": 0,
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 0, cfg.AgentActiveWindowMs)
+		assert.Equal(t, 0, cfg.AgentLivenessRecheckMs)
 	})
 }
