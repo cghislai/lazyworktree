@@ -519,6 +519,7 @@ func loadWorktreeCommandState(ctx context.Context, cmd *appiCli.Command, include
 			cfg.AgentSessionPiRoot,
 			nil,
 		)
+		agentSvc.SetParseTranscripts(cfg.AgentParseTranscripts)
 		_, _ = agentSvc.Refresh()
 		deps.agentSvc = agentSvc
 	}

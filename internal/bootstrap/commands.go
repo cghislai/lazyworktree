@@ -1054,10 +1054,16 @@ func outputListJSON(ctx context.Context, gitSvc *git.Service, cfg *config.AppCon
 		}
 	}
 
-	// Load agent sessions (best-effort).
+	// Load agent sessions (best-effort). cfg may be nil (scripting/tests), in
+	// which case fall back to defaults.
 	var agentSvc *services.AgentSessionService
 	if !noAgent {
-		agentSvc = services.NewAgentSessionService(nil)
+		if cfg != nil {
+			agentSvc = services.NewAgentSessionServiceFromConfig(cfg.AgentSessionClaudeRoot, cfg.AgentSessionPiRoot, nil)
+			agentSvc.SetParseTranscripts(cfg.AgentParseTranscripts)
+		} else {
+			agentSvc = services.NewAgentSessionService(nil)
+		}
 		_, _ = agentSvc.Refresh()
 	}
 

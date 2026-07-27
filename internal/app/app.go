@@ -605,6 +605,7 @@ func NewModel(cfg *config.AppConfig, initialFilter string) *Model {
 	m.state.services.agentSessions = services.NewAgentSessionServiceFromConfig(
 		cfg.AgentSessionClaudeRoot, cfg.AgentSessionPiRoot, m.debugf,
 	)
+	m.state.services.agentSessions.SetParseTranscripts(cfg.AgentParseTranscripts)
 	m.state.services.agentHooks = services.NewAgentHookService(services.AgentHookSpoolDir(), m.debugf)
 	m.state.services.agentSessions.SetHookService(m.state.services.agentHooks)
 	// The ps/lsof process scan is deprecated and opt-in; hook events installed

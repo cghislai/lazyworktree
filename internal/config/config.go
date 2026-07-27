@@ -75,6 +75,7 @@ type AppConfig struct {
 	AgentSessionsDisabled   bool   // Disable the Agent Sessions pane and transcript watching (default: false)
 	AgentProcessScan        bool   // Deprecated: opt in to ps/lsof process scanning for agent liveness (default: false; prefer setup-hooks)
 	AgentRefreshDebounceMs  int    // Debounce window (ms) for agent transcript refreshes (default: 600; 0 disables throttling)
+	AgentParseTranscripts   bool   // Read transcript contents for live status; when false only cwd + file mtime are read (default: true)
 	CustomCreateMenus       []*CustomCreateMenu
 	CustomThemes            map[string]*CustomTheme // User-defined custom themes
 	LayoutSizes             *LayoutSizes            // Configurable pane size weights (nil = use defaults)
@@ -117,6 +118,7 @@ func DefaultConfig() *AppConfig {
 		IconSet:                 "nerd-font-v3",
 		AvatarBadges:            "auto",
 		AgentRefreshDebounceMs:  600,
+		AgentParseTranscripts:   true,
 		CustomThemes:            make(map[string]*CustomTheme),
 		Keybindings:             make(KeybindingsConfig),
 		CustomCommands: CustomCommandsConfig{
@@ -227,6 +229,7 @@ func parseConfig(data map[string]any) (*AppConfig, error) {
 		cfg.AgentSessionsDisabled = coerceBool(agentData["disabled"], cfg.AgentSessionsDisabled)
 		cfg.AgentProcessScan = coerceBool(agentData["process_scan"], cfg.AgentProcessScan)
 		cfg.AgentRefreshDebounceMs = coerceInt(agentData["refresh_debounce_ms"], cfg.AgentRefreshDebounceMs)
+		cfg.AgentParseTranscripts = coerceBool(agentData["parse_transcripts"], cfg.AgentParseTranscripts)
 	}
 
 	cfg.InitCommands = normalizeCommandList(data["init_commands"])
@@ -637,6 +640,9 @@ func (cfg *AppConfig) ApplyCLIOverrides(overrides []string) error {
 	}
 	if overrideNestedData(overrideData, "agent_sessions", "refresh_debounce_ms") {
 		cfg.AgentRefreshDebounceMs = overrideCfg.AgentRefreshDebounceMs
+	}
+	if overrideNestedData(overrideData, "agent_sessions", "parse_transcripts") {
+		cfg.AgentParseTranscripts = overrideCfg.AgentParseTranscripts
 	}
 
 	// Arrays - check if they exist in override data

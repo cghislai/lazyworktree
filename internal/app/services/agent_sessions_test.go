@@ -357,6 +357,132 @@ func TestAgentSessionServiceRefreshFindsNestedClaudeJSONL(t *testing.T) {
 	}
 }
 
+func TestParseClaudeSessionShallow(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	worktreePath := filepath.Join(root, "worktrees", "feature")
+	contentTS := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+
+	path := filepath.Join(root, "claude.jsonl")
+	writeJSONLLines(
+		t, path,
+		mustJSONLine(t, map[string]any{
+			"type":      "user",
+			"cwd":       worktreePath,
+			"gitBranch": "feature/agent-pane",
+			"timestamp": contentTS,
+			"message":   map[string]any{"role": "user", "content": "Polish the agent sessions pane"},
+		}),
+		mustJSONLine(t, map[string]any{
+			"type":      "assistant",
+			"timestamp": contentTS,
+			"message": map[string]any{
+				"role": "assistant",
+				"content": []map[string]any{
+					{"type": "tool_use", "name": "Read", "input": map[string]any{"file_path": "x"}},
+				},
+			},
+		}),
+	)
+
+	// A distinctive mtime, later than the in-content timestamps, is what a
+	// shallow parse must report as last-active.
+	mtime := time.Date(2026, 3, 11, 9, 30, 0, 0, time.UTC)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	session, err := parseClaudeSessionShallow(path, "")
+	if err != nil {
+		t.Fatalf("parseClaudeSessionShallow returned error: %v", err)
+	}
+	if session.CWD != worktreePath {
+		t.Fatalf("expected cwd %q, got %q", worktreePath, session.CWD)
+	}
+	if session.GitBranch != "feature/agent-pane" {
+		t.Fatalf("expected git branch, got %q", session.GitBranch)
+	}
+	if !session.LastActivity.Equal(mtime) {
+		t.Fatalf("expected last-active from mtime %v, got %v", mtime, session.LastActivity)
+	}
+	// Live status must not be read in shallow mode.
+	if session.LastPromptText != "" || session.CurrentTool != "" || session.Status == models.AgentSessionStatusExecutingTool {
+		t.Fatalf("expected no live-status fields in shallow parse, got prompt=%q tool=%q status=%q",
+			session.LastPromptText, session.CurrentTool, session.Status)
+	}
+}
+
+func TestAgentSessionServiceParseTranscriptsToggle(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	claudeRoot := filepath.Join(root, "claude")
+	worktreePath := filepath.Join(root, "worktrees", "feature")
+	contentTS := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	sessionPath := filepath.Join(claudeRoot, "project-a", "session.jsonl")
+
+	writeJSONLLines(
+		t, sessionPath,
+		mustJSONLine(t, map[string]any{
+			"type":      "user",
+			"cwd":       worktreePath,
+			"timestamp": contentTS,
+			"message":   map[string]any{"role": "user", "content": "hello"},
+		}),
+		mustJSONLine(t, map[string]any{
+			"type":      "assistant",
+			"timestamp": contentTS,
+			"message": map[string]any{
+				"role": "assistant",
+				"content": []map[string]any{
+					{"type": "tool_use", "name": "Read", "input": map[string]any{"file_path": "x"}},
+				},
+			},
+		}),
+	)
+	mtime := time.Date(2026, 3, 11, 9, 30, 0, 0, time.UTC)
+	if err := os.Chtimes(sessionPath, mtime, mtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	newService := func() *AgentSessionService {
+		return NewAgentSessionServiceWithStore(claudeRoot, "", NewTestSessionRegistryStore(filepath.Join(t.TempDir(), "registry.json")), nil)
+	}
+
+	// Full parse (default): live status is populated from the content.
+	full := newService()
+	fullSessions, err := full.Refresh()
+	if err != nil {
+		t.Fatalf("full Refresh error: %v", err)
+	}
+	if len(fullSessions) != 1 || fullSessions[0].Status != models.AgentSessionStatusExecutingTool {
+		t.Fatalf("expected full parse to populate executing-tool status, got %+v", fullSessions)
+	}
+
+	// Shallow parse: cwd still resolves and last-active tracks the mtime, but
+	// live status is left empty — the growing tail is never read.
+	shallow := newService()
+	shallow.SetParseTranscripts(false)
+	shallowSessions, err := shallow.Refresh()
+	if err != nil {
+		t.Fatalf("shallow Refresh error: %v", err)
+	}
+	if len(shallowSessions) != 1 {
+		t.Fatalf("expected 1 shallow session, got %d", len(shallowSessions))
+	}
+	got := shallowSessions[0]
+	if got.CWD != worktreePath {
+		t.Fatalf("expected cwd %q, got %q", worktreePath, got.CWD)
+	}
+	if !got.LastActivity.Equal(mtime) {
+		t.Fatalf("expected shallow last-active from mtime %v, got %v", mtime, got.LastActivity)
+	}
+	if got.Status == models.AgentSessionStatusExecutingTool || got.CurrentTool != "" {
+		t.Fatalf("expected no live status in shallow mode, got status=%q tool=%q", got.Status, got.CurrentTool)
+	}
+}
+
 func TestParseClaudeSessionTracksNestedAgentApproval(t *testing.T) {
 	t.Parallel()
 

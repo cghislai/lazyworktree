@@ -19,6 +19,10 @@ const (
 	agentWaitingTimeout  = 2 * time.Minute
 	claudeSessionSchema  = "claude-jsonl-v1"
 	piSessionSchema      = "pi-jsonl-v1"
+	// shallowScanLines caps how many leading transcript lines a shallow parse
+	// reads to recover cwd/git branch before giving up, so cost is independent
+	// of transcript size.
+	shallowScanLines = 64
 )
 
 type agentSessionCacheEntry struct {
@@ -37,9 +41,22 @@ type AgentAdapter interface {
 }
 
 type transcriptAgentAdapter struct {
-	name  string
-	root  string
-	parse func(path, encodedDir string) (*models.AgentSession, error)
+	name string
+	root string
+	// parse reads the full transcript for live status; shallow reads only the
+	// leading entries (cwd, git branch) and takes last-active from the file
+	// mtime. useShallow selects shallow to avoid re-reading a large,
+	// actively-growing transcript on every write.
+	parse      func(path, encodedDir string) (*models.AgentSession, error)
+	shallow    func(path, encodedDir string) (*models.AgentSession, error)
+	useShallow bool
+}
+
+func (a *transcriptAgentAdapter) activeParse() func(path, encodedDir string) (*models.AgentSession, error) {
+	if a.useShallow && a.shallow != nil {
+		return a.shallow
+	}
+	return a.parse
 }
 
 func (a *transcriptAgentAdapter) Name() string {
@@ -63,7 +80,7 @@ func (a *transcriptAgentAdapter) Discover(
 	if a == nil {
 		return nil, nil
 	}
-	return discoverSessionsFromDir(a.root, seen, a.parse, cached)
+	return discoverSessionsFromDir(a.root, seen, a.activeParse(), cached)
 }
 
 // AgentSessionService discovers Claude and pi transcript sessions from disk.
@@ -77,6 +94,24 @@ type AgentSessionService struct {
 	store      SessionRegistryStore
 	hooks      *AgentHookService
 	logf       func(string, ...any)
+}
+
+// SetParseTranscripts controls whether transcripts are read in full for live
+// status (executing/waiting, last tool, last prompt/reply) or only shallowly
+// for identity (cwd, git branch) with last-active taken from the file mtime.
+// Disabling it keeps an actively-growing, possibly multi-gigabyte transcript
+// from being re-read on every write, at the cost of frozen live status.
+// Configured once at startup, before the first refresh.
+func (s *AgentSessionService) SetParseTranscripts(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, adapter := range s.adapters {
+		if ta, ok := adapter.(*transcriptAgentAdapter); ok {
+			ta.useShallow = !enabled
+		}
+	}
+	// Drop any sessions parsed under the previous mode so the change applies.
+	s.cache = make(map[string]agentSessionCacheEntry)
 }
 
 // NewAgentSessionService builds a service using the default agent transcript locations.
@@ -108,8 +143,8 @@ func NewAgentSessionServiceWithStore(claudeRoot, piRoot string, store SessionReg
 		claudeRoot: claudeRoot,
 		piRoot:     piRoot,
 		adapters: []AgentAdapter{
-			&transcriptAgentAdapter{name: "claude", root: claudeRoot, parse: parseClaudeSession},
-			&transcriptAgentAdapter{name: "pi", root: piRoot, parse: parsePiSession},
+			&transcriptAgentAdapter{name: "claude", root: claudeRoot, parse: parseClaudeSession, shallow: parseClaudeSessionShallow},
+			&transcriptAgentAdapter{name: "pi", root: piRoot, parse: parsePiSession, shallow: parsePiSessionShallow},
 		},
 		store: store,
 		logf:  logf,
@@ -401,6 +436,53 @@ func (m *claudeJSONLMessage) parseContent() {
 	case '[':
 		_ = json.Unmarshal(m.RawContent, &m.Content)
 	}
+}
+
+// parseClaudeSessionShallow builds a session from cheap signals only: the
+// session id (filename), the real cwd and git branch (read from the leading
+// entries), and last-active (file mtime). It never scans to the growing tail,
+// so cost does not depend on transcript size. Live status fields are left empty.
+func parseClaudeSessionShallow(path, _ string) (*models.AgentSession, error) {
+	//nolint:gosec // Transcript paths come from local agent directories discovered by the application.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	session := &models.AgentSession{
+		ID:            strings.TrimSuffix(filepath.Base(path), ".jsonl"),
+		Agent:         models.AgentKindClaude,
+		JSONLPath:     path,
+		LastActivity:  info.ModTime(),
+		SchemaVersion: claudeSessionSchema,
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for i := 0; i < shallowScanLines && scanner.Scan(); i++ {
+		var envelope claudeEnvelope
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			continue
+		}
+		if session.CWD == "" && envelope.CWD != "" {
+			session.CWD = envelope.CWD
+		}
+		if session.GitBranch == "" && envelope.GitBranch != "" {
+			session.GitBranch = envelope.GitBranch
+		}
+		if session.CWD != "" && session.GitBranch != "" {
+			break
+		}
+	}
+	return session, nil
 }
 
 func parseClaudeSession(path, encodedDir string) (*models.AgentSession, error) {
@@ -704,6 +786,56 @@ type piMessage struct {
 	Role    string          `json:"role"`
 	Model   string          `json:"model"`
 	Content json.RawMessage `json:"content"`
+}
+
+// parsePiSessionShallow is the shallow counterpart of parsePiSession: it reads
+// only the leading entries for cwd and display name and takes last-active from
+// the file mtime, never scanning the growing tail. See parseClaudeSessionShallow.
+func parsePiSessionShallow(path, encodedDir string) (*models.AgentSession, error) {
+	//nolint:gosec // Transcript paths come from local agent directories discovered by the application.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	session := &models.AgentSession{
+		ID:            strings.TrimSuffix(filepath.Base(path), ".jsonl"),
+		Agent:         models.AgentKindPi,
+		JSONLPath:     path,
+		LastActivity:  info.ModTime(),
+		SchemaVersion: piSessionSchema,
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for i := 0; i < shallowScanLines && scanner.Scan(); i++ {
+		var entry piEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		switch entry.Type {
+		case "session":
+			if session.CWD == "" && entry.CWD != "" {
+				session.CWD = entry.CWD
+			}
+		case "session_info":
+			if session.DisplayName == "" && entry.Name != "" {
+				session.DisplayName = entry.Name
+			}
+		}
+	}
+	if session.CWD == "" {
+		session.CWD = decodePiSessionDir(encodedDir)
+	}
+	return session, nil
 }
 
 func parsePiSession(path, encodedDir string) (*models.AgentSession, error) {

@@ -2089,4 +2089,18 @@ func TestParseConfigAgentSessions(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 0, cfg.AgentRefreshDebounceMs)
 	})
+
+	t.Run("parse_transcripts defaults to true", func(t *testing.T) {
+		cfg, err := parseConfig(map[string]any{})
+		require.NoError(t, err)
+		assert.True(t, cfg.AgentParseTranscripts)
+	})
+
+	t.Run("parse_transcripts can be disabled", func(t *testing.T) {
+		cfg, err := parseConfig(map[string]any{
+			"agent_sessions": map[string]any{"parse_transcripts": false},
+		})
+		require.NoError(t, err)
+		assert.False(t, cfg.AgentParseTranscripts)
+	})
 }
